@@ -629,7 +629,9 @@ class Picker:
                 events.append(ev)
                 start = min(start, ev["start_time"])
                 end = max(end, ev.get("end_time") or end)
-        start -= 2
+        # A person can be tracked long before entering the zone, and Frigate keeps no video of a
+        # stationary stretch: anchor on the visit, at most 30 s before it (seen 2026-11-09).
+        start = max(start, review["start_time"] - 30) - 2
         end += 2
         if end - start > self.cfg.max_clip_s:
             LOG.info("%s: %.0f s visit capped to %d s", review["id"], end - start, self.cfg.max_clip_s)
@@ -659,15 +661,29 @@ class Picker:
                     "rejected": _reject_counts(faces),
                     "frigate_review_url": f"/review?id={rid}"}
                 folder, records = write_output(self.cfg, kept, start, chosen, self.dry_run)
-        except (OSError, requests.RequestException, subprocess.CalledProcessError, ValueError) as err:
-            LOG.warning("%s: %s", rid, err)
-            self.stats["failed"] += 1
-            if not self.dry_run:
-                self.state.save(rid, review["start_time"], "retry", review, error=str(err)[:300])
-                st = self.state.status(rid)
-                if st and st[1] >= self.cfg.max_attempts:
-                    self.state.save(rid, review["start_time"], "failed", review, error=str(err)[:300])
+        except requests.HTTPError as err:
+            if err.response is not None and "No recordings" in err.response.text:
+                LOG.info("%s: Frigate has no recordings for this visit", rid)
+                if not self.dry_run:
+                    self.state.save(rid, review["start_time"], "no_recording", review)
+                return
+            self._fail(rid, review, err)
             return
+        except (OSError, requests.RequestException, subprocess.CalledProcessError, ValueError) as err:
+            self._fail(rid, review, err)
+            return
+        self._done(rid, review, t0, cpu0, frames, faces, chosen, meta, folder, records)
+
+    def _fail(self, rid: str, review: dict, err: Exception) -> None:
+        LOG.warning("%s: %s", rid, err)
+        self.stats["failed"] += 1
+        if not self.dry_run:
+            self.state.save(rid, review["start_time"], "retry", review, error=str(err)[:300])
+            st = self.state.status(rid)
+            if st and st[1] >= self.cfg.max_attempts:
+                self.state.save(rid, review["start_time"], "failed", review, error=str(err)[:300])
+
+    def _done(self, rid, review, t0, cpu0, frames, faces, chosen, meta, folder, records) -> None:
         persons = len([p for p in chosen if p])
         status = "done" if folder else "done_no_face"
         secs = round(time.time() - t0, 1)

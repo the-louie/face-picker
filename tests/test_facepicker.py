@@ -264,3 +264,16 @@ def test_single_person_without_path_keeps_faces(tmp_path):
     f = face(2, 0.9, [1, 0, 0])
     fp.assign_to_tracks([f], [ev("p", [])], 999.0, c)
     assert f.event == "p" and not f.reject
+
+
+def test_window_anchors_on_visit_not_on_early_tracking(tmp_path):
+    c = cfg(tmp_path)
+
+    class F(FakeFrigate):
+        def event(self, eid):
+            return {"id": eid, "label": "person", "start_time": 1000.0, "end_time": 2050.0}
+
+    p = fp.Picker(c, F(), fp.State(c.state_dir / "s.sqlite"), analyzer=None)
+    rev = {"id": "r", "start_time": 2000.0, "end_time": 2040.0, "data": {"detections": ["e"]}}
+    start, end, events = p.window(rev)
+    assert start == 1968.0 and end == 2052.0 and events[0]["id"] == "e"
