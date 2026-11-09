@@ -205,14 +205,18 @@ def test_write_output_flat_files(tmp_path):
     assert [r["file"] for r in recs2] == [f"{st}_{n}.jpg" for n in (4, 5, 6)]
 
 
-def test_sample_frames_one_per_second(tmp_path):
+def test_sample_frames_rate(tmp_path):
     clip = tmp_path / "t.mp4"
     subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
                     "testsrc=size=2560x1920:rate=20:duration=5.5", "-pix_fmt", "yuv420p", str(clip)],
                    check=True)
     c = fp.Config()
+    c.fps = 1
     frames = list(fp.sample_frames(clip, c, use_vaapi=False))
     assert 5 <= len(frames) <= 6
+    c.fps = 2
+    two = list(fp.sample_frames(clip, c, use_vaapi=False))
+    assert 11 <= len(two) <= 12 and two[1][0] == 0.5
     _t, fr = frames[0]
     assert fr.shape == (1920, 2560, 3)
     assert fp.analysis_size(2560, 1920, 1080) == (1440, 1080)

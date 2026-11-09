@@ -11,7 +11,7 @@ Every 5 minutes:
 1. **Pick.**
    - Finds new doorbell visits: Frigate review items with a person in `doorbell_zone`, ended
      at least 2 minutes ago.
-   - Downloads each visit's clip from Frigate's API and decodes 1 frame per second at full
+   - Downloads each visit's clip from Frigate's API and decodes 2 frames per second (`FPS`) at full
      resolution (VA-API on the iGPU, with a CPU fallback).
    - Finds faces with **YuNet** (the same detector Frigate uses).
    - Drops faces that fail the quality gates: detection score, size, frame edge, head turn

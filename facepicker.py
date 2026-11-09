@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 import requests
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LOG = logging.getLogger("facepicker")
 
 
@@ -62,6 +62,7 @@ class Config:
     pause_minutes: tuple[int, int] = (10, 18)
     vaapi_device: str = _env("VAAPI_DEVICE", "/dev/dri/renderD128")
     analysis_height: int = 1080                           # Frigate's MAX_DETECTION_HEIGHT
+    fps: float = float(_env("FPS", "2"))                  # frames sampled per second (owner: 2, 2026-11-09)
     # gates (section 5.3 of the plan); full-resolution pixels
     min_det_score: float = float(_env("MIN_DET_SCORE", "0.75"))
     min_face_h: int = int(_env("MIN_FACE_H", "120"))
@@ -253,7 +254,7 @@ def _ffmpeg_frames(cmd: list[str], w: int, h: int):
 
 
 def sample_frames(path: Path, cfg: Config, use_vaapi: bool):
-    """Yield (t_seconds, full-resolution BGR frame), 1 per second. VAAPI with CPU fallback.
+    """Yield (t_seconds, full-resolution BGR frame), cfg.fps per second. VAAPI, CPU fallback.
 
     Full resolution on purpose: the crops must come from the very frame that was scored.
     Re-reading a frame by seeking later gave a different moment (tested 2026-11-09).
@@ -261,20 +262,20 @@ def sample_frames(path: Path, cfg: Config, use_vaapi: bool):
     w, h = probe_size(path)
     base = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
     out = ["-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:"]
-    cpu = base + ["-i", str(path), "-vf", "fps=1"] + out
+    cpu = base + ["-i", str(path), "-vf", f"fps={cfg.fps:g}"] + out
     if use_vaapi and Path(cfg.vaapi_device).exists():
         hw = base + ["-hwaccel", "vaapi", "-hwaccel_device", cfg.vaapi_device,
                      "-hwaccel_output_format", "vaapi", "-i", str(path), "-vf",
-                     "fps=1,hwdownload,format=nv12"] + out
+                     f"fps={cfg.fps:g},hwdownload,format=nv12"] + out
         got = False
         for i, fr in enumerate(_ffmpeg_frames(hw, w, h)):
             got = True
-            yield float(i), fr
+            yield i / cfg.fps, fr
         if got:
             return
         LOG.warning("VAAPI decode gave no frames for %s; using the CPU", path.name)
     for i, fr in enumerate(_ffmpeg_frames(cpu, w, h)):
-        yield float(i), fr
+        yield i / cfg.fps, fr
 
 
 # ---------------------------------------------------------------------------- faces
