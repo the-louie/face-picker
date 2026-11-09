@@ -7,3 +7,4 @@ __pycache__/
 *.webp
 *.mp4
 data/
+docker-compose.override.yml
