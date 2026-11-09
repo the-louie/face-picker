@@ -23,9 +23,12 @@ Every 5 minutes:
      who come one after the other never share a folder's ranking. A "face" with no tracked
      person near it (a wheel, a poster) is rejected.
    - Without track data, it falls back to: two faces in the same frame are two people.
-   - Writes `incoming/<YYYY-MM-DD_HH-MM-SS>/`. With one person: `1.jpg 2.jpg 3.jpg`. With
-     several: `p1_1.jpg …`, plus `*_context.jpg` (the whole frame with the face boxed) and
-     `meta.json` (scores, times, Frigate ids).
+   - Writes flat files: `incoming/<YYYY-MM-DD_HH-MM-SS>_<n>.jpg`. The stamp is the visit's
+     start, so one visit's images sort together. `n` is the rank, 1 the best; with several
+     people, person 1's images come first, then person 2's. When two visits start in the same
+     second, the numbering simply continues.
+   - The details (scores, the time inside the clip, the Frigate review and event ids) go into
+     the state database's `faces` table, not next to the images.
 2. **Train.**
    - Moves every image you drop into `pending/<name>/` to Frigate:
      `POST /api/faces/<name>/register`.
@@ -37,9 +40,11 @@ It never writes to or deletes Frigate's media. Nothing is pruned: unpicked folde
 ## Your part
 
 1. Look in `/path/to/facetraining/incoming/`.
-2. Copy the best image of a person to `pending/<name>/`, for example `pending/kim/`. Use
+2. Move the best image of a person to `pending/<name>/`, for example `pending/kim/`. Use
    letters, digits, spaces and `_` in names, and the same lowercase name each time.
-3. Within 5 minutes it's in Frigate's face library. Start with 1–3 images per person, then
+3. Move the images you don't want to `discarded/` before you delete them. All five folders
+   are writable over NFS as the anonymous user; the picker recreates them at each start.
+4. Within 5 minutes it's in Frigate's face library. Start with 1–3 images per person, then
    use Frigate's own **Train** tab, which starts filling once the library has someone in it.
 
 ## Running
@@ -63,7 +68,8 @@ Other options:
 - It pauses from :10 to :18 every 6 hours, while Frigate's cron restarts it.
 
 **State:**
-- `/data/.state/state.sqlite`: the visits processed, and what was trained.
+- `/data/.state/state.sqlite`: the visits processed (`items`), each image's scores and
+  origin (`faces`), and what was trained (`trained`).
 - `/data/.state/status.json`: the last round's figures. No notifications, by the owner's
   choice.
 

@@ -4,7 +4,7 @@
 Every round (default 5 min):
   PICK   new doorbell visits (Frigate review items with a person) -> the visit's clip ->
          1 frame/s -> YuNet faces -> quality gates -> eDifFIQA ranking -> top 3 per person
-         -> incoming/<YYYY-MM-DD_HH-MM-SS>/ (crops, context frames, meta.json)
+         -> incoming/<YYYY-MM-DD_HH-MM-SS>_<n>.jpg (n = rank; details in the state database)
   TRAIN  pending/<name>/<image> -> Frigate POST /api/faces/<name>/register
          -> trained/<name>/ (ok) or pending/<name>/failed/ (+ .reason.txt)
 
@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 import requests
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 LOG = logging.getLogger("facepicker")
 
 
@@ -80,7 +80,6 @@ class Config:
     track_max_dt: float = 3.0                             # path point must be this close in time
     crop_margin: float = 0.4
     crop_max_side: int = 1024
-    context_width: int = 1280
     train_settle_s: int = 30
 
     @property
@@ -94,6 +93,10 @@ class Config:
     @property
     def trained(self) -> Path:
         return self.data / "trained"
+
+    @property
+    def discarded(self) -> Path:
+        return self.data / "discarded"
 
     @property
     def state_dir(self) -> Path:
@@ -166,6 +169,8 @@ class State:
             id TEXT PRIMARY KEY, start_time REAL, status TEXT, attempts INTEGER DEFAULT 0,
             folder TEXT, faces INTEGER, persons INTEGER, seconds REAL, error TEXT,
             review TEXT, updated REAL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS faces (
+            file TEXT PRIMARY KEY, review_id TEXT, record TEXT, visit TEXT, created REAL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS trained (
             file TEXT, name TEXT, time REAL, success INTEGER, message TEXT)""")
         self.db.commit()
@@ -200,6 +205,12 @@ class State:
 
     def counts(self) -> dict:
         return dict(self.db.execute("SELECT status, COUNT(*) FROM items GROUP BY status").fetchall())
+
+    def save_faces(self, review_id: str, visit: dict, records: list[dict]) -> None:
+        for r in records:
+            self.db.execute("INSERT OR REPLACE INTO faces VALUES (?,?,?,?,?)",
+                            (r["file"], review_id, json.dumps(r), json.dumps(visit), time.time()))
+        self.db.commit()
 
     def log_trained(self, file: str, name: str, success: bool, message: str) -> None:
         self.db.execute("INSERT INTO trained VALUES (?,?,?,?,?)",
@@ -500,71 +511,54 @@ def crop_face(full: np.ndarray, box: list[int], margin: float, max_side: int) ->
     return crop
 
 
-def context_image(full: np.ndarray, box: list[int], width: int) -> np.ndarray:
-    img = full.copy()
-    x, y, w, h = box
-    th = max(2, full.shape[1] // 400)
-    cv2.rectangle(img, (x, y), (x + w, y + h), (0, 200, 255), th)
-    k = width / img.shape[1]
-    return cv2.resize(img, (width, int(img.shape[0] * k)), interpolation=cv2.INTER_AREA)
+def stamp(start: float, tz: ZoneInfo) -> str:
+    return dt.datetime.fromtimestamp(start, tz).strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def folder_name(start: float, tz: ZoneInfo, existing: set[str]) -> str:
-    base = dt.datetime.fromtimestamp(start, tz).strftime("%Y-%m-%d_%H-%M-%S")
-    name, n = base, 2
-    while name in existing:
-        name, n = f"{base}_{n}", n + 1
-    return name
+def next_index(incoming: Path, st: str) -> int:
+    """The first free n for <stamp>_<n>.jpg (two visits can start in the same second)."""
+    used = [int(m.group(1)) for p in incoming.glob(f"{st}_*.jpg")
+            if (m := re.fullmatch(re.escape(st) + r"_(\d+)\.jpg", p.name))]
+    return max(used, default=0) + 1
 
 
 def write_output(cfg: Config, frames: dict[float, np.ndarray], start: float,
-                 chosen: list[list[Face]], meta: dict, dry_run: bool = False) -> str | None:
+                 chosen: list[list[Face]], dry_run: bool = False) -> tuple[str | None, list[dict]]:
+    """Write incoming/<YYYY-MM-DD_HH-MM-SS>_<n>.jpg, n = rank (person 1 first, then person 2).
+
+    The stamp is the visit's start, so one visit's images sort together. Returns the stamp
+    and one record per written image (kept in the state database, not next to the images).
+    """
     flat = [f for p in chosen for f in p]
     if not flat:
-        return None
+        return None, []
     cfg.incoming.mkdir(parents=True, exist_ok=True)
-    existing = {p.name for p in cfg.incoming.iterdir()}
-    name = folder_name(start, cfg.tz, existing)
-    if dry_run:
-        return name
-    tmp = cfg.incoming / f".tmp-{name}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir()
-    multi = len(chosen) > 1
-    faces_meta = []
+    st = stamp(start, cfg.tz)
+    n = next_index(cfg.incoming, st)
+    records = []
     for p in chosen:
         for rank, f in enumerate(p, start=1):
-            stem = f"p{f.person}_{rank}" if multi else f"{rank}"
             full = frames.get(f.t)
             if full is None:
                 LOG.warning("frame at %.1f s was not kept", f.t)
                 continue
+            name = f"{st}_{n}.jpg"
+            n += 1
             box = f.box_full
-            cv2.imwrite(str(tmp / f"{stem}.jpg"),
-                        crop_face(full, box, cfg.crop_margin, cfg.crop_max_side),
-                        [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(str(tmp / f"{stem}_context.jpg"),
-                        context_image(full, box, cfg.context_width),
-                        [cv2.IMWRITE_JPEG_QUALITY, 85])
-            faces_meta.append({
-                "file": f"{stem}.jpg", "person": f.person, "rank": rank, "frigate_event": f.event,
-                "offset_s": round(f.t, 1),
+            if not dry_run:
+                tmp = cfg.incoming / f".tmp-{name}"
+                cv2.imwrite(str(tmp), crop_face(full, box, cfg.crop_margin, cfg.crop_max_side),
+                            [cv2.IMWRITE_JPEG_QUALITY, 95])
+                tmp.rename(cfg.incoming / name)
+            records.append({
+                "file": name, "person": f.person, "rank": rank, "frigate_event": f.event,
+                "offset_s": round(float(f.t), 1),
                 "wall_time": dt.datetime.fromtimestamp(start + f.t, cfg.tz).isoformat(timespec="seconds"),
-                "box_fullres": box, "yunet": round(f.det, 3), "ediffiqa": round(f.quality, 3),
-                "score": round(f.score, 3), "yaw_deg": round(f.yaw, 1), "roll_deg": round(f.roll, 1),
-                "sharpness": round(f.sharpness, 1), "luminance": round(f.lum, 1)})
-    if not faces_meta:
-        shutil.rmtree(tmp, ignore_errors=True)
-        return None
-    meta = dict(meta, faces=faces_meta, picker_version=VERSION)
-    (tmp / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False, default=_jsonable))
-    tmp.rename(cfg.incoming / name)
-    return name
-
-
-def _jsonable(o):
-    """NumPy scalars and arrays in meta.json."""
-    return o.item() if hasattr(o, "item") and getattr(o, "size", 1) == 1 else o.tolist()
+                "box_fullres": [int(v) for v in box], "yunet": round(float(f.det), 3),
+                "ediffiqa": round(float(f.quality), 3), "score": round(float(f.score), 3),
+                "yaw_deg": round(float(f.yaw), 1), "roll_deg": round(float(f.roll), 1),
+                "sharpness": round(float(f.sharpness), 1), "luminance": round(float(f.lum), 1)})
+    return (st if records else None), records
 
 
 def analyse_clip(cfg: Config, analyzer: Analyzer, clip: Path, use_vaapi: bool,
@@ -664,7 +658,7 @@ class Picker:
                     "faces_passed": sum(1 for f in faces if not f.reject),
                     "rejected": _reject_counts(faces),
                     "frigate_review_url": f"/review?id={rid}"}
-                folder = write_output(self.cfg, kept, start, chosen, meta, self.dry_run)
+                folder, records = write_output(self.cfg, kept, start, chosen, self.dry_run)
         except (OSError, requests.RequestException, subprocess.CalledProcessError, ValueError) as err:
             LOG.warning("%s: %s", rid, err)
             self.stats["failed"] += 1
@@ -678,11 +672,13 @@ class Picker:
         status = "done" if folder else "done_no_face"
         secs = round(time.time() - t0, 1)
         LOG.info("%s: %d frames, %d faces (%d passed), %d person(s) -> %s  [%.1f s, cpu %.1f s]",
-                 rid, frames, len(faces), meta["faces_passed"], persons, folder or "no folder",
+                 rid, frames, len(faces), meta["faces_passed"], persons,
+                 f"{folder}_1..{len(records)}" if folder else "no images",
                  secs, time.process_time() - cpu0)
         self.stats["processed"] += 1
         self.stats["folders"] += bool(folder)
         if not self.dry_run:
+            self.state.save_faces(rid, meta, records)
             self.state.save(rid, review["start_time"], status, review, folder=folder,
                             faces=len(faces), persons=persons, seconds=secs)
 
@@ -779,12 +775,11 @@ def in_pause(cfg: Config, now: dt.datetime) -> bool:
 
 
 def write_status(cfg: Config, state: State, extra: dict) -> None:
-    incoming = [p for p in cfg.incoming.iterdir() if p.is_dir() and not p.name.startswith(".")] \
-        if cfg.incoming.exists() else []
+    incoming = list(cfg.incoming.glob("*.jpg")) if cfg.incoming.exists() else []
     pending = sum(1 for d in cfg.pending.glob("*/*") if d.is_file() and d.suffix.lower() in IMAGE_EXT) \
         if cfg.pending.exists() else 0
     status = {"time": dt.datetime.now(cfg.tz).isoformat(timespec="seconds"), "version": VERSION,
-              "items": state.counts(), "incoming_folders": len(incoming),
+              "items": state.counts(), "incoming_images": len(incoming),
               "pending_files": pending, **extra}
     tmp = cfg.state_dir / "status.json.tmp"
     tmp.write_text(json.dumps(status, indent=2))
@@ -807,8 +802,10 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     os.umask(0o000)   # the owner moves files over the share with another uid
     cfg = Config()
-    for d in (cfg.incoming, cfg.pending, cfg.trained, cfg.state_dir):
+    for d in (cfg.incoming, cfg.pending, cfg.trained, cfg.discarded, cfg.state_dir):
         d.mkdir(parents=True, exist_ok=True)
+        if d != cfg.state_dir:
+            d.chmod(0o777)     # the owner works over NFS as the anonymous user
     use_vaapi = not a.no_vaapi
 
     if a.clip:
@@ -816,11 +813,9 @@ def main(argv: list[str] | None = None) -> int:
         frames, faces, kept = analyse_clip(cfg, an, a.clip, use_vaapi)
         chosen = select(faces, cfg)
         start = a.clip.stat().st_mtime
-        name = write_output(cfg, kept, start, chosen,
-                            {"source": "file", "file": a.clip.name, "frames_sampled": frames,
-                             "faces_found": len(faces),
-                             "faces_passed": sum(1 for f in faces if not f.reject),
-                             "rejected": _reject_counts(faces)}, a.dry_run)
+        name, records = write_output(cfg, kept, start, chosen, a.dry_run)
+        for r in records:
+            LOG.info("  %s", json.dumps(r))
         LOG.info("%s: %d frames, %d faces, %d passed, persons %d -> %s", a.clip.name, frames,
                  len(faces), sum(1 for f in faces if not f.reject), len(chosen), name)
         return 0

@@ -76,13 +76,13 @@ def test_select_caps_persons(tmp_path):
     assert len(fp.select(faces, c)) == 3
 
 
-def test_folder_name_collisions():
-    tz = ZoneInfo("Europe/Stockholm")
-    ts = dt.datetime(2026, 11, 9, 14, 21, 7, tzinfo=tz).timestamp()
-    assert fp.folder_name(ts, tz, set()) == "2026-11-09_14-21-07"
-    assert fp.folder_name(ts, tz, {"2026-11-09_14-21-07"}) == "2026-11-09_14-21-07_2"
-    assert fp.folder_name(ts, tz, {"2026-11-09_14-21-07", "2026-11-09_14-21-07_2"}) \
-        == "2026-11-09_14-21-07_3"
+def test_next_index_continues_after_existing(tmp_path):
+    assert fp.next_index(tmp_path, "2026-11-09_14-21-07") == 1
+    for n in (1, 2, 3):
+        (tmp_path / f"2026-11-09_14-21-07_{n}.jpg").write_bytes(b"x")
+    (tmp_path / "2026-11-09_14-21-07_x.jpg").write_bytes(b"x")
+    assert fp.next_index(tmp_path, "2026-11-09_14-21-07") == 4
+    assert fp.next_index(tmp_path, "2026-11-09_14-21-08") == 1
 
 
 def test_crop_face_clamps_and_limits():
@@ -188,19 +188,21 @@ def test_train_pending_success_and_failure(tmp_path):
     assert "No face" in (c.pending / "kim" / "failed" / "4.jpg.reason.txt").read_text()
 
 
-def test_write_output_layout(tmp_path, monkeypatch):
+def test_write_output_flat_files(tmp_path):
     c = cfg(tmp_path)
-    a = [1, 0, 0]
-    chosen = fp.select([face(0, 0.9, a), face(3, 0.8, a)], c)
-    ts = dt.datetime(2026, 11, 9, 14, 21, 7, tzinfo=c.tz).timestamp()
+    a, b = [1, 0, 0], [0, 1, 0]
+    chosen = fp.select([face(0, 0.9, a), face(0, 0.6, b), face(3, 0.8, a)], c)
     frames = {0: np.full((1920, 2560, 3), 128, np.uint8), 3: np.full((1920, 2560, 3), 90, np.uint8)}
-    name = fp.write_output(c, frames, ts, chosen, {"review_id": "r"})
-    d = c.incoming / name
-    assert sorted(p.name for p in d.iterdir()) == ["1.jpg", "1_context.jpg", "2.jpg",
-                                                   "2_context.jpg", "meta.json"]
-    meta = json.loads((d / "meta.json").read_text())
-    assert meta["faces"][1]["offset_s"] == 3 and meta["faces"][0]["wall_time"].endswith("14:21:07+01:00")
-    assert not any(p.name.startswith(".tmp") for p in c.incoming.iterdir())
+    ts = dt.datetime(2026, 11, 9, 14, 21, 7, tzinfo=c.tz).timestamp()
+    st, recs = fp.write_output(c, frames, ts, chosen)
+    assert st == "2026-11-09_14-21-07"
+    assert sorted(p.name for p in c.incoming.iterdir()) == [f"{st}_{n}.jpg" for n in (1, 2, 3)]
+    assert [(r["file"][-5:], r["person"], r["rank"]) for r in recs] == \
+        [("1.jpg", 1, 1), ("2.jpg", 1, 2), ("3.jpg", 2, 1)]
+    assert recs[1]["offset_s"] == 3 and recs[0]["wall_time"].endswith("14:21:07+01:00")
+    json.dumps(recs)                                     # plain types only
+    _, recs2 = fp.write_output(c, frames, ts, chosen)    # same second again: numbering continues
+    assert [r["file"] for r in recs2] == [f"{st}_{n}.jpg" for n in (4, 5, 6)]
 
 
 def test_sample_frames_one_per_second(tmp_path):
