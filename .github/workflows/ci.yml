@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image (downloads and checks the models)
+        run: docker build -t facepicker:ci .
+      - name: Run the tests inside the image
+        run: >
+          docker run --rm --entrypoint sh -v "$PWD:/src:ro" -e MODEL_DIR=/app/models facepicker:ci
+          -c "pip install -q --root-user-action=ignore pytest &&
+          cd /tmp && cp -r /src/tests /src/facepicker.py . &&
+          python -m pytest -q -p no:cacheprovider tests"

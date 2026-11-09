@@ -6,7 +6,6 @@ incoming/<stamp>[_k]/{1.jpg | p1_1.jpg, *_context.jpg, meta.json}
 import json
 import shutil
 import sys
-from pathlib import Path
 
 sys.path.insert(0, "/app")
 import facepicker as fp  # noqa: E402
