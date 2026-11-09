@@ -1,0 +1,9 @@
+models/
+__pycache__/
+.venv/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.mp4
+data/

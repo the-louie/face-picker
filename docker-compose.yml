@@ -1,0 +1,28 @@
+services:
+  facepicker:
+    build: .
+    image: facepicker:local
+    container_name: facepicker
+    restart: unless-stopped
+    network_mode: host            # Frigate's API is on 127.0.0.1:5000
+    cpus: 1.0                     # never more than 1 of server_1's 4 cores
+    cpu_shares: 128               # lowest priority against Frigate (default 1024)
+    mem_limit: 1g
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "105"                     # render group on server_1
+    volumes:
+      - /path/to/facetraining:/data
+    tmpfs:
+      - /tmp:size=512m
+    environment:
+      FRIGATE_URL: http://127.0.0.1:5000
+      CAMERA: doorbell_cam
+      ZONE: doorbell_zone
+      TZ: Europe/Stockholm
+      INTERVAL_S: "300"
+      BACKFILL_DAYS: "30"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
