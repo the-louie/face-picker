@@ -98,3 +98,8 @@ From the OpenCV model zoo, downloaded at build time and checked against `models.
 | SFace `face_recognition_sface_2021dec` | face alignment and embeddings | Apache-2.0 |
 
 The Coral isn't used: Frigate holds it exclusively.
+
+## Licence
+
+The code is under the [BSD 2-Clause licence](LICENSE). The models it downloads keep their own
+licences (see the table above).
