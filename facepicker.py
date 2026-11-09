@@ -34,7 +34,7 @@ import cv2
 import numpy as np
 import requests
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LOG = logging.getLogger("facepicker")
 
 
@@ -298,6 +298,7 @@ class Face:
     person: int = 0
     xn: float = 0.0            # face centre x as a fraction of the frame width
     event: str | None = None   # the Frigate person event this face belongs to
+    crop: np.ndarray | None = None  # cut from the full-resolution frame when scored
 
     @property
     def box_full(self) -> list[int]:
@@ -523,8 +524,8 @@ def next_index(incoming: Path, st: str) -> int:
     return max(used, default=0) + 1
 
 
-def write_output(cfg: Config, frames: dict[float, np.ndarray], start: float,
-                 chosen: list[list[Face]], dry_run: bool = False) -> tuple[str | None, list[dict]]:
+def write_output(cfg: Config, start: float, chosen: list[list[Face]],
+                 dry_run: bool = False) -> tuple[str | None, list[dict]]:
     """Write incoming/<YYYY-MM-DD_HH-MM-SS>_<n>.jpg, n = rank (person 1 first, then person 2).
 
     The stamp is the visit's start, so one visit's images sort together. Returns the stamp
@@ -539,17 +540,15 @@ def write_output(cfg: Config, frames: dict[float, np.ndarray], start: float,
     records = []
     for p in chosen:
         for rank, f in enumerate(p, start=1):
-            full = frames.get(f.t)
-            if full is None:
-                LOG.warning("frame at %.1f s was not kept", f.t)
+            if f.crop is None:
+                LOG.warning("no crop for the face at %.1f s", f.t)
                 continue
             name = f"{st}_{n}.jpg"
             n += 1
             box = f.box_full
             if not dry_run:
                 tmp = cfg.incoming / f".tmp-{name}"
-                cv2.imwrite(str(tmp), crop_face(full, box, cfg.crop_margin, cfg.crop_max_side),
-                            [cv2.IMWRITE_JPEG_QUALITY, 95])
+                cv2.imwrite(str(tmp), f.crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 tmp.rename(cfg.incoming / name)
             records.append({
                 "file": name, "person": f.person, "rank": rank, "frigate_event": f.event,
@@ -562,25 +561,24 @@ def write_output(cfg: Config, frames: dict[float, np.ndarray], start: float,
     return (st if records else None), records
 
 
-def analyse_clip(cfg: Config, analyzer: Analyzer, clip: Path, use_vaapi: bool,
-                 keep: int = 12):
-    """Return (frames sampled, all faces, {t: full frame} for the best frames with faces)."""
+def analyse_clip(cfg: Config, analyzer: Analyzer, clip: Path, use_vaapi: bool):
+    """Return (frames sampled, all faces). Each passing face carries its crop.
+
+    The crop is cut from the full-resolution frame at once: keeping whole frames until
+    the selection lost some of them at 2 fps (seen 2026-11-09) and cost 15 MB each.
+    """
     faces: list[Face] = []
-    kept: dict[float, tuple[float, np.ndarray]] = {}
     frames = 0
     for t, full in sample_frames(clip, cfg, use_vaapi):
         frames += 1
         aw, ah = analysis_size(full.shape[1], full.shape[0], cfg.analysis_height)
         small = cv2.resize(full, (aw, ah), interpolation=cv2.INTER_AREA) \
             if (aw, ah) != (full.shape[1], full.shape[0]) else full
-        found = analyzer.evaluate(small, t, full.shape[1] / aw)
-        faces += found
-        best = max((f.score for f in found if not f.reject), default=None)
-        if best is not None:
-            kept[t] = (best, full)
-            if len(kept) > keep:
-                del kept[min(kept, key=lambda k: kept[k][0])]
-    return frames, faces, {t: fr for t, (_, fr) in kept.items()}
+        for f in analyzer.evaluate(small, t, full.shape[1] / aw):
+            if not f.reject:
+                f.crop = crop_face(full, f.box_full, cfg.crop_margin, cfg.crop_max_side)
+            faces.append(f)
+    return frames, faces
 
 
 # ---------------------------------------------------------------------------- pick
@@ -648,7 +646,7 @@ class Picker:
             with tempfile.TemporaryDirectory(dir="/tmp") as td:
                 clip = Path(td) / "clip.mp4"
                 self.frigate.clip(self.cfg.camera, start, end, clip)
-                frames, faces, kept = analyse_clip(self.cfg, self.an, clip, self.use_vaapi)
+                frames, faces = analyse_clip(self.cfg, self.an, clip, self.use_vaapi)
                 tracked = assign_to_tracks(faces, events, start, self.cfg)
                 chosen = select(faces, self.cfg)
                 meta = {
@@ -661,7 +659,7 @@ class Picker:
                     "faces_passed": sum(1 for f in faces if not f.reject),
                     "rejected": _reject_counts(faces),
                     "frigate_review_url": f"/review?id={rid}"}
-                folder, records = write_output(self.cfg, kept, start, chosen, self.dry_run)
+                folder, records = write_output(self.cfg, start, chosen, self.dry_run)
         except requests.HTTPError as err:
             if err.response is not None and "No recordings" in err.response.text:
                 LOG.info("%s: Frigate has no recordings for this visit", rid)
@@ -827,10 +825,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.clip:
         an = Analyzer(cfg)
-        frames, faces, kept = analyse_clip(cfg, an, a.clip, use_vaapi)
+        frames, faces = analyse_clip(cfg, an, a.clip, use_vaapi)
         chosen = select(faces, cfg)
         start = a.clip.stat().st_mtime
-        name, records = write_output(cfg, kept, start, chosen, a.dry_run)
+        name, records = write_output(cfg, start, chosen, a.dry_run)
         for r in records:
             LOG.info("  %s", json.dumps(r))
         LOG.info("%s: %d frames, %d faces, %d passed, persons %d -> %s", a.clip.name, frames,

@@ -191,17 +191,19 @@ def test_train_pending_success_and_failure(tmp_path):
 def test_write_output_flat_files(tmp_path):
     c = cfg(tmp_path)
     a, b = [1, 0, 0], [0, 1, 0]
-    chosen = fp.select([face(0, 0.9, a), face(0, 0.6, b), face(3, 0.8, a)], c)
-    frames = {0: np.full((1920, 2560, 3), 128, np.uint8), 3: np.full((1920, 2560, 3), 90, np.uint8)}
+    faces = [face(0, 0.9, a), face(0, 0.6, b), face(3, 0.8, a)]
+    for f in faces:
+        f.crop = np.full((300, 240, 3), 128, np.uint8)
+    chosen = fp.select(faces, c)
     ts = dt.datetime(2026, 11, 9, 14, 21, 7, tzinfo=c.tz).timestamp()
-    st, recs = fp.write_output(c, frames, ts, chosen)
+    st, recs = fp.write_output(c, ts, chosen)
     assert st == "2026-11-09_14-21-07"
     assert sorted(p.name for p in c.incoming.iterdir()) == [f"{st}_{n}.jpg" for n in (1, 2, 3)]
     assert [(r["file"][-5:], r["person"], r["rank"]) for r in recs] == \
         [("1.jpg", 1, 1), ("2.jpg", 1, 2), ("3.jpg", 2, 1)]
     assert recs[1]["offset_s"] == 3 and recs[0]["wall_time"].endswith("14:21:07+01:00")
     json.dumps(recs)                                     # plain types only
-    _, recs2 = fp.write_output(c, frames, ts, chosen)    # same second again: numbering continues
+    _, recs2 = fp.write_output(c, ts, chosen)    # same second again: numbering continues
     assert [r["file"] for r in recs2] == [f"{st}_{n}.jpg" for n in (4, 5, 6)]
 
 
